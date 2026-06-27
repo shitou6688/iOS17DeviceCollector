@@ -5,6 +5,10 @@
  * 数据源: ../data/collected.json
  */
 
+$configFile = __DIR__ . '/../config.json';
+$config = json_decode(file_exists($configFile) ? file_get_contents($configFile) : '{}', true) ?: [];
+$targetIOS = $config['target_ios'] ?? '17.0';
+
 $dataFile = __DIR__ . '/../data/collected.json';
 $devices = [];
 if (file_exists($dataFile)) {
@@ -12,6 +16,18 @@ if (file_exists($dataFile)) {
 }
 // 倒序 (最新的在前)
 $devices = array_reverse($devices);
+
+// 处理保存设置
+$saved = false;
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['target_ios'])) {
+    $v = trim($_POST['target_ios']);
+    if (preg_match('/^\d+\.\d+/', $v)) {
+        $config['target_ios'] = $v;
+        file_put_contents($configFile, json_encode($config, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT));
+        $targetIOS = $v;
+        $saved = true;
+    }
+}
 
 // 统计
 $totalCount = count($devices);
@@ -59,6 +75,13 @@ function cleanUrl($url) {
         .header { text-align: center; padding: 40px 0 30px; }
         .header h1 { font-size: 28px; background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
         .header p { color: #8b949e; margin-top: 8px; }
+        .settings { max-width: 600px; margin: 0 auto 20px; background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 20px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .settings label { color: #8b949e; font-size: 14px; white-space: nowrap; }
+        .settings input { padding: 8px 12px; border-radius: 6px; border: 1px solid #30363d; background: #0d1117; color: #e1e4e8; font-size: 16px; width: 80px; text-align: center; }
+        .settings button { padding: 8px 18px; border-radius: 6px; border: none; background: #238636; color: #fff; font-size: 14px; cursor: pointer; }
+        .settings button:hover { background: #2ea043; }
+        .settings .toast { color: #3fb950; font-size: 13px; display: none; }
+        .settings .toast.show { display: inline; }
         .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 15px; max-width: 900px; margin: 0 auto 30px; }
         .stat { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 18px; text-align: center; }
         .stat .num { font-size: 32px; font-weight: 700; color: #58a6ff; }
