@@ -1,1 +1,1 @@
-{"target_ios":"17.0","upload_url":"http://124.221.171.80/chaxun/api/collect.php"}
+{"thresholds":{"lt":{"enabled":true,"version":"17.0"},"eq":{"enabled":true,"version":"17.0"},"gt":{"enabled":false,"version":"17.0"}}}

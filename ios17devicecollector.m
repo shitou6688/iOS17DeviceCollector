@@ -1,23 +1,7 @@
 /*
- * iOS17DeviceCollector.m
- * ======================
- * 巨魔注入插件 - 转转/爱回收 iOS 17.0 设备自动采集
- *
- * 工作原理:
- *   1. 注入 JS 到 WebView, 监听页面内容
- *   2. 检测到 "iOS 17.0" → 自动提取机型/价格/链接
- *   3. POST 到你的服务器
- *
- * 编译 (需 macOS + Xcode):
- *   xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
- *     -framework Foundation -framework UIKit -framework WebKit \
- *     -o iOS17Collector.dylib iOS17DeviceCollector.m
- *
- * 注入:
- *   用巨魔注入器把 iOS17Collector.dylib 注入到转转.ipa 的 /Frameworks/
- *
- * 服务器端:
- *   需要 PHP 接收脚本 (见 collect.php)
+ * iOS17DeviceCollector.m - 巨魔注入插件
+ * 三阈值采集: <X.X  =X.X  >X.X，从服务器动态读取配置
+ * 注入到转转/爱回收，WebView JS扫描 + API拦截双重采集
  */
 
 #import <Foundation/Foundation.h>
@@ -25,38 +9,97 @@
 #import <WebKit/WebKit.h>
 #import <objc/runtime.h>
 
-// ======================== 配置 ========================
-#define UPLOAD_URL   @"http://124.221.171.80/chaxun/api/collect.php"
-#define TARGET_IOS   @"17.0"
-// ======================================================
+// ================= 默认配置 (会被服务器覆盖) =================
+#define CONFIG_URL  @"http://124.221.171.80/chaxun/getConfig.php"
+#define UPLOAD_URL  @"http://124.221.171.80/chaxun/collect.php"
+// ===========================================================
 
-#pragma mark - 数据模型
+#pragma mark - 阈值模型
 
-@interface DeviceInfo : NSObject
-@property (nonatomic, copy) NSString *title;
-@property (nonatomic, copy) NSString *price;
-@property (nonatomic, copy) NSString *infoId;
-@property (nonatomic, copy) NSString *detailURL;
-@property (nonatomic, copy) NSString *iosVer;
-@property (nonatomic, copy) NSString *time;
-@property (nonatomic, copy) NSString *source;
-@property (nonatomic, copy) NSString *context;  // 上下文文本 (用于验证)
+@interface Threshold : NSObject
+@property BOOL enabled;
+@property (copy) NSString *op;   // "lt" "eq" "gt"
+@property (copy) NSString *ver;  // "17.0"
+- (BOOL)matchVersion:(NSString *)version;
 @end
 
-@implementation DeviceInfo
-- (NSString *)jsonString {
-    NSDictionary *d = @{
-        @"title":    _title ?: @"",
-        @"price":    _price ?: @"",
-        @"info_id":  _infoId ?: @"",
-        @"url":      _detailURL ?: @"",
-        @"ios_ver":  _iosVer ?: @"",
-        @"time":     _time ?: @"",
-        @"source":   _source ?: @"",
-        @"context":  _context ?: @""
-    };
-    NSData *j = [NSJSONSerialization dataWithJSONObject:d options:0 error:nil];
-    return [[NSString alloc] initWithData:j encoding:NSUTF8StringEncoding];
+@implementation Threshold
+- (BOOL)matchVersion:(NSString *)v {
+    if (!_enabled || !v.length) return NO;
+    NSArray *a = [v componentsSeparatedByString:@"."];
+    NSArray *b = [_ver componentsSeparatedByString:@"."];
+    NSInteger n = MAX(a.count, b.count);
+    for (NSInteger i = 0; i < n; i++) {
+        NSInteger ai = (i < a.count) ? [a[i] integerValue] : 0;
+        NSInteger bi = (i < b.count) ? [b[i] integerValue] : 0;
+        if ([_op isEqualToString:@"lt"]) return ai < bi;
+        if ([_op isEqualToString:@"gt"]) return ai > bi;
+        if (ai != bi) return NO;
+    }
+    return [_op isEqualToString:@"eq"];
+}
+@end
+
+#pragma mark - 全局配置
+
+@interface CollectorConfig : NSObject
+@property (copy) NSArray<Threshold *> *thresholds;
++ (instancetype)shared;
+- (void)fetchFromServer;
+- (BOOL)shouldCapture:(NSString *)iosVersion;
+@end
+
+@implementation CollectorConfig
+
++ (instancetype)shared { static id s; static dispatch_once_t t; dispatch_once(&t,^{s=[self new];}); return s; }
+
+- (instancetype)init {
+    if (self = [super init]) {
+        // 默认阈值
+        Threshold *t1 = [Threshold new]; t1.op = @"lt"; t1.ver = @"17.0"; t1.enabled = YES;
+        Threshold *t2 = [Threshold new]; t2.op = @"eq"; t2.ver = @"17.0"; t2.enabled = YES;
+        Threshold *t3 = [Threshold new]; t3.op = @"gt"; t3.ver = @"17.0"; t3.enabled = NO;
+        _thresholds = @[t1, t2, t3];
+    }
+    return self;
+}
+
+- (void)fetchFromServer {
+    NSURL *url = [NSURL URLWithString:@CONFIG_URL];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url cachePolicy:1 timeoutInterval:10];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        if (!d || e) return;
+        NSDictionary *cfg = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        if (!cfg) return;
+        NSDictionary *ts = cfg[@"thresholds"];
+        if (![ts isKindOfClass:[NSDictionary class]]) return;
+        NSMutableArray *arr = [NSMutableArray array];
+        for (NSString *op in @[@"lt",@"eq",@"gt"]) {
+            NSDictionary *item = ts[op];
+            if ([item isKindOfClass:[NSDictionary class]]) {
+                Threshold *t = [Threshold new];
+                t.op = op;
+                t.ver = item[@"version"] ?: @"17.0";
+                t.enabled = [item[@"enabled"] boolValue];
+                [arr addObject:t];
+            }
+        }
+        if (arr.count == 3) {
+            self.thresholds = arr;
+            NSLog(@"[iOS17Col] 配置已更新: lt=%@(%@) eq=%@(%@) gt=%@(%@)",
+                  arr[0].ver, arr[0].enabled?@"ON":@"OFF",
+                  arr[1].ver, arr[1].enabled?@"ON":@"OFF",
+                  arr[2].ver, arr[2].enabled?@"ON":@"OFF");
+        }
+    }] resume];
+}
+
+- (BOOL)shouldCapture:(NSString *)ver {
+    if (!ver.length) return NO;
+    for (Threshold *t in self.thresholds) {
+        if ([t matchVersion:ver]) return YES;
+    }
+    return NO;
 }
 @end
 
@@ -64,391 +107,208 @@
 
 @interface Uploader : NSObject
 + (instancetype)shared;
-- (void)upload:(DeviceInfo *)device;
-- (void)log:(NSString *)msg;
+- (void)upload:(NSDictionary *)info;
 @end
 
-@implementation Uploader {
-    NSMutableSet *_dedup;
-}
+@implementation Uploader { NSMutableSet *_dedup; }
++ (instancetype)shared { static id s; static dispatch_once_t t; dispatch_once(&t,^{s=[self new];}); return s; }
+- (instancetype)init { if(self=[super init])_dedup=[NSMutableSet set]; return self; }
 
-+ (instancetype)shared {
-    static Uploader *s;
-    static dispatch_once_t t;
-    dispatch_once(&t, ^{ s = [[Uploader alloc] init]; });
-    return s;
-}
+- (void)upload:(NSDictionary *)info {
+    NSString *fp = [NSString stringWithFormat:@"%@|%@", info[@"title"]?:@"", info[@"url"]?:@""];
+    @synchronized(_dedup) { if([_dedup containsObject:fp])return; if(_dedup.count>500)[_dedup removeAllObjects]; [_dedup addObject:fp]; }
 
-- (instancetype)init {
-    if (self = [super init]) {
-        _dedup = [NSMutableSet set];
-    }
-    return self;
-}
-
-- (void)upload:(DeviceInfo *)device {
-    // 去重: 同商品 10 分钟内不重复上报
-    NSString *fingerprint = [NSString stringWithFormat:@"%@|%@",
-        device.title, device.detailURL];
-    @synchronized(_dedup) {
-        if ([_dedup containsObject:fingerprint]) return;
-        if (_dedup.count > 500) [_dedup removeAllObjects];
-        [_dedup addObject:fingerprint];
-    }
-    
-    [self log:[NSString stringWithFormat:@"📱 捕获: %@ | ¥%@",
-        device.title, device.price]];
-    
-    NSURL *url = [NSURL URLWithString:UPLOAD_URL];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
-    req.HTTPMethod = @"POST";
-    req.HTTPBody = [[device jsonString] dataUsingEncoding:NSUTF8StringEncoding];
+    NSData *body = [NSJSONSerialization dataWithJSONObject:info options:0 error:nil];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@UPLOAD_URL]];
+    req.HTTPMethod = @"POST"; req.HTTPBody = body; req.timeoutInterval = 10;
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
-    req.timeoutInterval = 10;
-    
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req
-        completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        if (e) {
-            [self log:[NSString stringWithFormat:@"❌ 上传失败: %@", e.localizedDescription]];
-        } else {
-            NSInteger code = ((NSHTTPURLResponse *)r).statusCode;
-            [self log:[NSString stringWithFormat:@"✅ 上传成功 HTTP %ld", (long)code]];
-        }
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d,NSURLResponse *r,NSError *e){
+        if(!e) NSLog(@"[iOS17Col] ✅ 上传: %@", info[@"title"]);
+        else NSLog(@"[iOS17Col] ❌ 上传失败");
     }] resume];
 }
-
-- (void)log:(NSString *)msg {
-    NSLog(@"[iOS17Col] %@", msg);
-}
 @end
 
-#pragma mark - JS 注入脚本
+#pragma mark - JS 注入
 
-// 列表页扫描 JS
+// 增强版 JS - 提取所有 iOS 版本号并回传
 static NSString *kScanJS =
-    @"(function(){\n"
-    @" if(window.__i17c_scan)return;window.__i17c_scan=1;\n"
-    @" var seen=new Set();\n"
-    @" function scan(){\n"
-    @"  try{\n"
-    @"   var t=document.body.innerText||'';\n"
-    @"   if(!/17\\.0|iOS\\s*17|ios\\s*17/.test(t))return;\n"
-    @"   var fp=t.substring(0,60);\n"
-    @"   if(seen.has(fp))return;seen.add(fp);\n"
-    // 提取 iOS 版本上下文
-    @"   var m=t.match(/(?:iOS|ios|系统|版本)[^\\n]{0,30}17\\.0[^\\n]{0,30}/g)||[];\n"
-    @"   var ctx=m.join('|').substring(0,500);\n"
+    @"(function(){"
+    @" if(window.__i17c)return;window.__i17c=1;"
+    @" var sent=new Set();"
+    @" function scan(){"
+    @"  try{"
+    @"   var t=document.body.innerText||'';"
+    @"   if(!/iOS|ios/.test(t))return;"
+    // 提取所有 iOS 版本号
+    @"   var re=/(?:iOS|ios|系统|版本)\\s*(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)/gi;"
+    @"   var m,versions=[];"
+    @"   while(m=re.exec(t)){"
+    @"    var ver=m[1];"
+    @"    if(versions.indexOf(ver)<0)versions.push(ver);"
+    @"   }"
+    @"   if(!versions.length)return;"
+    @"   var fp=versions.join(',')+t.substring(0,50);"
+    @"   if(sent.has(fp))return;sent.add(fp);"
     // 提取价格
-    @"   var pm=t.match(/[¥￥￥]\\s*([\\d,]+)/);\n"
-    @"   var price=pm?pm[1]:'';\n"
-    // 提取标题
-    @"   var h1=document.querySelector('h1,[class*=title]');\n"
-    @"   var title=h1?h1.innerText:(document.title||'');\n"
-    @"   window.webkit.messageHandlers.i17c.postMessage({\n"
-    @"    t:'scan',u:location.href,title:title,price:price,ctx:ctx\n"
-    @"   });\n"
-    @"  }catch(e){}\n"
-    @" }\n"
-    @" setInterval(scan,3000);scan();\n"
-    @" var ob=new MutationObserver(function(){setTimeout(scan,800);});\n"
-    @" ob.observe(document.body||document.documentElement,{childList:1,subtree:1,characterData:1});\n"
-    @"})();";
-
-// 详情页深度扫描 JS  
-static NSString *kDetailJS =
-    @"(function(){\n"
-    @" if(window.__i17c_detail)return;window.__i17c_detail=1;\n"
-    @" setTimeout(function(){\n"
-    @"  try{\n"
-    @"   var t=document.body.innerText||'';\n"
-    @"   if(!/(iOS|ios|系统|版本)\\s*17\\.0/.test(t))return;\n"
-    // 尝试获取结构化数据
-    @"   var title=document.title||'';\n"
-    @"   var price='';\n"
-    @"   var p=document.querySelector('[class*=price],.price,.now-price');\n"
-    @"   if(p)price=p.innerText.replace(/[^0-9.]/g,'');\n"
-    @"   if(!price){\n"
-    @"     var pm=t.match(/[¥￥￥]\\s*([\\d,]+)/);\n"
-    @"     if(pm)price=pm[1];\n"
-    @"   }\n"
-    // 提取 iOS 版本周围的详细描述
-    @"   var idx=t.search(/(iOS|ios|系统|版本)\\s*17\\.0/i);\n"
-    @"   var ctx='';\n"
-    @"   if(idx>=0){\n"
-    @"     var s=Math.max(0,idx-150);\n"
-    @"     ctx=t.substring(s,idx+200);\n"
-    @"   }\n"
-    @"   window.webkit.messageHandlers.i17c.postMessage({\n"
-    @"    t:'detail',u:location.href,title:title,price:price,ctx:ctx\n"
-    @"   });\n"
-    @"  }catch(e){}\n"
-    @" },2000);\n"
+    @"   var pm=t.match(/[¥￥]\\s*([\\d,]+)/);"
+    @"   var price=pm?pm[1]:'';"
+    // 提取机型
+    @"   var im=t.match(/(iPhone\\s*\\d+\\s*(Pro|Max|Plus|mini)?\\s*(Max)?)/i);"
+    @"   var title=im?im[1]:(document.title||'');"
+    @"   if(!im&&document.title){"
+    @"     var dm=document.title.match(/(iPhone\\s*\\d+\\s*(Pro|Max|Plus|mini)?)/i);"
+    @"     if(dm)title=dm[1];"
+    @"   }"
+    // 提取 infoId
+    @"   var iid='';"
+    @"   var um=location.href.match(/infoId=(\\d+)/);"
+    @"   if(um)iid=um[1];"
+    @"   window.webkit.messageHandlers.i17c.postMessage({"
+    @"    t:'scan',u:location.href,title:title,price:price,iid:iid,versions:versions,"
+    @"    ctx:t.substring(Math.max(0,re.lastIndex-150),re.lastIndex+150)"
+    @"   });"
+    @"  }catch(e){}"
+    @" }"
+    @" setInterval(scan,3000);scan();"
+    @" new MutationObserver(function(){setTimeout(scan,800);}).observe(document.body||document.documentElement,{childList:1,subtree:1,characterData:1});"
     @"})();";
 
 
 #pragma mark - 消息处理器
 
 @interface MsgHandler : NSObject <WKScriptMessageHandler>
+- (void)ensureJS:(WKUserContentController *)ctl;
 @end
 
 @implementation MsgHandler
 
-- (void)userContentController:(WKUserContentController *)ctl
-      didReceiveScriptMessage:(WKScriptMessage *)msg {
-    
+- (void)userContentController:(WKUserContentController *)ctl didReceiveScriptMessage:(WKScriptMessage *)msg {
     if (![msg.body isKindOfClass:[NSDictionary class]]) return;
     NSDictionary *b = msg.body;
-    
-    DeviceInfo *di = [[DeviceInfo alloc] init];
-    di.title = b[@"title"] ?: @"未知";
-    di.price = b[@"price"] ?: @"";
-    di.detailURL = b[@"u"] ?: @"";
-    di.iosVer = TARGET_IOS;
-    di.context = b[@"ctx"] ?: @"";
-    
-    // 来源
-    NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-    di.source = [bid containsString:@"zhuanzhuan"] ? @"转转" :
-                [bid containsString:@"aihuishou"] ? @"爱回收" : bid;
-    
-    // 时间
-    NSDateFormatter *df = [[NSDateFormatter alloc] init];
-    df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-    df.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
-    di.time = [df stringFromDate:[NSDate date]];
-    
-    // 过滤：必须有实质内容
-    if (di.title.length < 2 || [di.title isEqualToString:@"未知"]) {
-        // 尝试从 context 提取
-        NSArray *models = @[@"iPhone", @"iPad", @"iPod"];
-        for (NSString *m in models) {
-            NSRange r = [di.context rangeOfString:m options:NSCaseInsensitiveSearch];
-            if (r.location != NSNotFound) {
-                NSUInteger end = MIN(r.location + 30, di.context.length);
-                di.title = [di.context substringWithRange:
-                    NSMakeRange(r.location, end - r.location)];
-                break;
-            }
-        }
-    }
-    
-    // 尝试提取 infoId (从 URL 中)
-    NSRegularExpression *re = [NSRegularExpression
-        regularExpressionWithPattern:@"infoId=(\\d+)" options:0 error:nil];
-    NSTextCheckingResult *m = [re firstMatchInString:di.detailURL
-        options:0 range:NSMakeRange(0, di.detailURL.length)];
-    if (m && m.numberOfRanges > 1) {
-        di.infoId = [di.detailURL substringWithRange:[m rangeAtIndex:1]];
-    }
-    
-    // 确保 JS 已注入
+    NSArray *versions = b[@"versions"];
+    if (![versions isKindOfClass:[NSArray class]] || !versions.count) return;
+
     [self ensureJS:ctl];
-    
-    // 上传
-    [[Uploader shared] upload:di];
-}
 
-// 防重复注入
-- (void)ensureJS:(WKUserContentController *)ctl {
-    static NSMutableSet *done;
-    static dispatch_once_t t;
-    dispatch_once(&t, ^{ done = [NSMutableSet set]; });
-    
-    NSValue *k = [NSValue valueWithNonretainedObject:ctl];
-    @synchronized(done) {
-        if ([done containsObject:k]) return;
-        [done addObject:k];
-    }
-    
-    // 注册 handler
-    [ctl addScriptMessageHandler:self name:@"i17c"];
-    
-    // 注入扫描脚本
-    WKUserScript *s1 = [[WKUserScript alloc]
-        initWithSource:kScanJS
-        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
-        forMainFrameOnly:YES];
-    [ctl addUserScript:s1];
-    
-    // 注入详情脚本
-    WKUserScript *s2 = [[WKUserScript alloc]
-        initWithSource:kDetailJS
-        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
-        forMainFrameOnly:YES];
-    [ctl addUserScript:s2];
-}
+    for (NSString *ver in versions) {
+        if (![[CollectorConfig shared] shouldCapture:ver]) continue;
 
-@end
+        NSDateFormatter *df = [NSDateFormatter new];
+        df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+        df.locale = [NSLocale localeWithLocaleIdentifier:@"zh_CN"];
 
-
-#pragma mark - Hook WKUserContentController
-
-static MsgHandler *gHandler = nil;
-
-static IMP _orig_addScriptMessageHandler;
-static void _hook_addScriptMessageHandler(id self, SEL _cmd,
-    id<WKScriptMessageHandler> handler, NSString *name) {
-    
-    if (!gHandler) {
-        gHandler = [[MsgHandler alloc] init];
-        [gHandler ensureJS:self];
-    }
-    
-    if (_orig_addScriptMessageHandler) {
-        ((void(*)(id,SEL,id,NSString*))_orig_addScriptMessageHandler)(self,_cmd,handler,name);
-    }
-}
-
-static IMP _orig_addUserScript;
-static void _hook_addUserScript(id self, SEL _cmd, WKUserScript *script) {
-    if (gHandler) [gHandler ensureJS:self];
-    if (_orig_addUserScript) {
-        ((void(*)(id,SEL,WKUserScript*))_orig_addUserScript)(self,_cmd,script);
-    }
-}
-
-
-#pragma mark - Hook: NSURLSession
-
-@interface NSObject (iOS17C_APIHook)
-- (void)_parseAPIResponse:(NSData *)data url:(NSString *)url;
-@end
-
-// ======================== NSURLSession Hook ========================
-
-static IMP _orig_dataTaskWithReq;
-static NSURLSessionDataTask* _hook_dataTaskWithReq(
-    id self, SEL _cmd, NSURLRequest *req,
-    void(^handler)(NSData*,NSURLResponse*,NSError*)) {
-    
-    NSString *u = req.URL.absoluteString;
-    
-    // 拦截搜索/详情 API
-    if ([u containsString:@"transfer/search"] ||
-        [u containsString:@"getfeedflowinfo"] ||
-        [u containsString:@"new-goods-detail"]) {
-        
-        void(^wrapped)(NSData*,NSURLResponse*,NSError*) =
-            ^(NSData *d, NSURLResponse *r, NSError *e) {
-            if (d && !e) {
-                NSString *s = [[NSString alloc] initWithData:d
-                    encoding:NSUTF8StringEncoding];
-                // 仅当响应中提到 iOS 版本时才处理
-                if (s && ([s containsString:@"17.0"] ||
-                          [s rangeOfString:@"iOS 17" 
-                              options:NSCaseInsensitiveSearch].location != NSNotFound)) {
-                    [(NSObject*)self _parseAPIResponse:d url:u];
-                }
-            }
-            if (handler) handler(d, r, e);
+        NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
+        NSDictionary *info = @{
+            @"title": b[@"title"]?:@"未知", @"price":b[@"price"]?:@"",
+            @"ios_ver": ver, @"url":b[@"u"]?:@"",
+            @"info_id":b[@"iid"]?:@"", @"context":b[@"ctx"]?:@"",
+            @"time":[df stringFromDate:[NSDate date]],
+            @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
+            @"threshold_op": @"-"  // filled in by server
         };
-        
-        return ((id(*)(id,SEL,id,id))_orig_dataTaskWithReq)(self,_cmd,req,wrapped);
-    }
-    
-    return ((id(*)(id,SEL,id,id))_orig_dataTaskWithReq)(self,_cmd,req,handler);
-}
-
-
-@implementation NSObject (iOS17C_APIHook)
-
-- (void)_parseAPIResponse:(NSData *)data url:(NSString *)url {
-    @try {
-        NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data
-            options:0 error:nil];
-        if (!json) return;
-        
-        // 提取商品列表
-        NSArray *infos = json[@"respData"][@"infos"] ?:
-                         json[@"data"][@"list"] ?:
-                         json[@"data"][@"infos"];
-        if (![infos isKindOfClass:[NSArray class]]) return;
-        
-        for (NSDictionary *info in infos) {
-            NSString *title = info[@"title"] ?: info[@"infoDesc"] ?: @"";
-            NSString *infoId = info[@"infoId"] ?: info[@"strInfoId"] ?:
-                               [info[@"infoId"] description] ?: @"";
-            NSString *jumpUrl = info[@"jumpUrl"] ?: @"";
-            
-            NSDictionary *pi = info[@"priceInfo"];
-            NSString *price = pi[@"priceText"] ?:
-                [NSString stringWithFormat:@"%@", pi[@"value"]];
-            
-            if (title.length > 3) {
-                // API 数据中没有 iOS 版本，标记为"待确认"
-                // 仅上传明确的 iPhone 机型 (减少噪音)
-                if (![title.lowercaseString hasPrefix:@"iphone"] &&
-                    ![title.lowercaseString hasPrefix:@"ipad"]) continue;
-                
-                DeviceInfo *di = [[DeviceInfo alloc] init];
-                di.title = title;
-                di.price = price ?: @"";
-                di.infoId = infoId;
-                di.detailURL = jumpUrl.length > 0 ? jumpUrl : url;
-                di.iosVer = [NSString stringWithFormat:@"%@?", TARGET_IOS];
-                di.context = @"[API capture - verify iOS version]";
-                
-                NSDateFormatter *df = [[NSDateFormatter alloc] init];
-                df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-                di.time = [df stringFromDate:[NSDate date]];
-                
-                NSString *bid = [[NSBundle mainBundle] bundleIdentifier];
-                di.source = [bid containsString:@"zhuanzhuan"] ? @"转转" : @"爱回收";
-                
-                [[Uploader shared] upload:di];
-            }
-        }
-    } @catch (NSException *e) {
-        NSLog(@"[iOS17Col] Parse error: %@", e);
+        [[Uploader shared] upload:info];
     }
 }
 
+- (void)ensureJS:(WKUserContentController *)ctl {
+    static NSMutableSet *done; static dispatch_once_t t; dispatch_once(&t,^{done=[NSMutableSet set];});
+    NSValue *k = [NSValue valueWithNonretainedObject:ctl];
+    @synchronized(done){ if([done containsObject:k])return; [done addObject:k]; }
+    [ctl addScriptMessageHandler:self name:@"i17c"];
+    [ctl addUserScript:[[WKUserScript alloc] initWithSource:kScanJS injectionTime:WKUserScriptInjectionTimeAtDocumentEnd forMainFrameOnly:YES]];
+}
 @end
 
 
-#pragma mark - 初始化
+#pragma mark - Hooks
+
+static MsgHandler *gHandler;
+
+// Hook WKUserContentController
+static IMP _orig_addSMH;
+static void _hook_addSMH(id self, SEL _cmd, id<WKScriptMessageHandler> h, NSString *n) {
+    if(!gHandler){gHandler=[MsgHandler new];[gHandler ensureJS:self];}
+    if(_orig_addSMH)((void(*)(id,SEL,id,NSString*))_orig_addSMH)(self,_cmd,h,n);
+}
+static IMP _orig_addUS;
+static void _hook_addUS(id self, SEL _cmd, WKUserScript *s){
+    if(gHandler)[gHandler ensureJS:self];
+    if(_orig_addUS)((void(*)(id,SEL,WKUserScript*))_orig_addUS)(self,_cmd,s);
+}
+
+// Hook NSURLSession (备选)
+@interface NSObject (I17C)
+- (void)_parseAPI:(NSData *)d url:(NSString *)u;
+@end
+
+static IMP _orig_dtwr;
+static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSURLResponse*,NSError*)) {
+    NSString *u = req.URL.absoluteString;
+    if ([u containsString:@"transfer/search"]||[u containsString:@"getfeedflowinfo"]) {
+        id(^wrap)(NSData*,NSURLResponse*,NSError*) = ^(NSData *d,NSURLResponse *r,NSError *e){
+            if(d&&!e){
+                NSString *s=[[NSString alloc] initWithData:d encoding:4];
+                if(s&&[s rangeOfString:@"iOS" options:1].location!=NSNotFound)[(NSObject*)self _parseAPI:d url:u];
+            }
+            if(h)h(d,r,e);
+            return (id)nil;
+        };
+        return ((id(*)(id,SEL,id,id))_orig_dtwr)(self,_cmd,req,[wrap copy]);
+    }
+    return ((id(*)(id,SEL,id,id))_orig_dtwr)(self,_cmd,req,h);
+}
+
+@implementation NSObject (I17C)
+- (void)_parseAPI:(NSData *)d url:(NSString *)u {
+    @try {
+        NSDictionary *j=[NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
+        NSArray *infos=j[@"respData"][@"infos"]?:j[@"data"][@"list"]?:j[@"data"][@"infos"];
+        if(![infos isKindOfClass:[NSArray class]])return;
+        NSDateFormatter *df=[NSDateFormatter new];df.dateFormat=@"yyyy-MM-dd HH:mm:ss";
+        NSString *bid=[[NSBundle mainBundle] bundleIdentifier];
+        for(NSDictionary *info in infos){
+            NSString *title=info[@"title"]?:info[@"infoDesc"]?:@"";
+            if(title.length<3)continue;
+            NSDictionary *pi=info[@"priceInfo"];
+            NSString *price=pi[@"priceText"]?:[NSString stringWithFormat:@"%@",pi[@"value"]];
+            // API 没有 iOS 版本号，标记为 API 来源
+            [[Uploader shared] upload:@{
+                @"title":title,@"price":price?:@"",
+                @"ios_ver":@"API",@"url":info[@"jumpUrl"]?:u,
+                @"info_id":[info[@"infoId"]?:info[@"strInfoId"] description]?:@"",
+                @"time":[df stringFromDate:[NSDate date]],
+                @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
+                @"context":@"[API响应-需人工确认版本]"
+            }];
+        }
+    }@catch(NSException *e){}
+}
+@end
+
+
+#pragma mark - 入口
 
 __attribute__((constructor))
 static void _init(void) {
     @autoreleasepool {
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC),
-            dispatch_get_main_queue(), ^{
-            
-            [[Uploader shared] log:@"🚀 插件已加载"];
-            [[Uploader shared] log:[NSString stringWithFormat:
-                @"目标: iOS %@, 上传: %@", TARGET_IOS, UPLOAD_URL]];
-            
-            // Hook 1: WKUserContentController
-            Class c = NSClassFromString(@"WKUserContentController");
-            if (c) {
-                Method m1 = class_getInstanceMethod(c,
-                    @selector(addScriptMessageHandler:name:));
-                if (m1) {
-                    _orig_addScriptMessageHandler = method_getImplementation(m1);
-                    method_setImplementation(m1,
-                        (IMP)_hook_addScriptMessageHandler);
-                    [[Uploader shared] log:@"✅ Hooked WKUserContentController"];
-                }
-                
-                Method m2 = class_getInstanceMethod(c,
-                    @selector(addUserScript:));
-                if (m2) {
-                    _orig_addUserScript = method_getImplementation(m2);
-                    method_setImplementation(m2, (IMP)_hook_addUserScript);
-                }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5*NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            NSLog(@"[iOS17Col] 🚀 插件已加载");
+            [[CollectorConfig shared] fetchFromServer];
+
+            Class c=NSClassFromString(@"WKUserContentController");
+            if(c){
+                Method m=class_getInstanceMethod(c,@selector(addScriptMessageHandler:name:));
+                if(m){_orig_addSMH=method_getImplementation(m);method_setImplementation(m,(IMP)_hook_addSMH);}
+                m=class_getInstanceMethod(c,@selector(addUserScript:));
+                if(m){_orig_addUS=method_getImplementation(m);method_setImplementation(m,(IMP)_hook_addUS);}
             }
-            
-            // Hook 2: NSURLSession (备选)
-            Class sc = NSClassFromString(@"NSURLSession");
-            if (sc) {
-                Method m3 = class_getInstanceMethod(sc,
-                    @selector(dataTaskWithRequest:completionHandler:));
-                if (m3) {
-                    _orig_dataTaskWithReq = method_getImplementation(m3);
-                    method_setImplementation(m3, (IMP)_hook_dataTaskWithReq);
-                    [[Uploader shared] log:@"✅ Hooked NSURLSession"];
-                }
+            Class sc=NSClassFromString(@"NSURLSession");
+            if(sc){
+                Method m=class_getInstanceMethod(sc,@selector(dataTaskWithRequest:completionHandler:));
+                if(m){_orig_dtwr=method_getImplementation(m);method_setImplementation(m,(IMP)_hook_dtwr);}
             }
+            NSLog(@"[iOS17Col] ✅ Hooks done");
         });
     }
 }
