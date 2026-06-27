@@ -1,0 +1,42 @@
+name: Build iOS17DeviceCollector
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'iOS17Collector/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build dylib
+        run: |
+          cd iOS17Collector
+          xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
+            -fobjc-arc -O2 \
+            -framework Foundation -framework UIKit -framework WebKit \
+            -o iOS17DeviceCollector.dylib \
+            iOS17DeviceCollector.m
+          
+          brew install ldid 2>/dev/null
+          ldid -S iOS17DeviceCollector.dylib 2>/dev/null || echo "sign skipped"
+          
+          file iOS17DeviceCollector.dylib
+          ls -lh iOS17DeviceCollector.dylib
+          echo "BUILD SUCCESS"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iOS17DeviceCollector
+          path: |
+            iOS17Collector/iOS17DeviceCollector.dylib
+            iOS17Collector/iOS17DeviceCollector.plist
+            iOS17Collector/collect.php
+          retention-days: 30
