@@ -119,7 +119,7 @@
     @synchronized(_dedup) { if([_dedup containsObject:fp])return; if(_dedup.count>500)[_dedup removeAllObjects]; [_dedup addObject:fp]; }
 
     NSData *body = [NSJSONSerialization dataWithJSONObject:info options:0 error:nil];
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@UPLOAD_URL]];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:UPLOAD_URL]];
     req.HTTPMethod = @"POST"; req.HTTPBody = body; req.timeoutInterval = 10;
     [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
     [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d,NSURLResponse *r,NSError *e){
