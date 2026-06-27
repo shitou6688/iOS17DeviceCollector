@@ -3,8 +3,6 @@ name: Build iOS17DeviceCollector
 on:
   push:
     branches: [main, master]
-    paths:
-      - 'iOS17Collector/**'
   workflow_dispatch:
 
 jobs:
@@ -17,15 +15,14 @@ jobs:
 
       - name: Build dylib
         run: |
-          cd iOS17Collector
           xcrun -sdk iphoneos clang -arch arm64 -dynamiclib \
             -fobjc-arc -O2 \
             -framework Foundation -framework UIKit -framework WebKit \
             -o iOS17DeviceCollector.dylib \
-            iOS17DeviceCollector.m
+            ios17devicecollector.m
           
           brew install ldid 2>/dev/null
-          ldid -S iOS17DeviceCollector.dylib 2>/dev/null || echo "sign skipped"
+          ldid -S iOS17DeviceCollector.dylib 2>/dev/null || echo "ldid sign skipped"
           
           file iOS17DeviceCollector.dylib
           ls -lh iOS17DeviceCollector.dylib
@@ -36,7 +33,7 @@ jobs:
         with:
           name: iOS17DeviceCollector
           path: |
-            iOS17Collector/iOS17DeviceCollector.dylib
-            iOS17Collector/iOS17DeviceCollector.plist
-            iOS17Collector/collect.php
+            iOS17DeviceCollector.dylib
+            ios17devicecollector.plist
+            collect.php
           retention-days: 30
