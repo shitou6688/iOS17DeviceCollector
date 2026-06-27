@@ -194,7 +194,7 @@ static NSString *kScanJS =
     @"   fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body,credentials:'include'})"
     @"   .then(function(r){if(!r.ok)throw r.status;return r.text();})"
     @"   .then(function(txt){"
-    @"    var re=/(?:systemVersion|osVersion|iOS|ios|系统版本|操作系统)"?\s*[:=]\s*"?(\d{1,2}\.\d{1,2}(?:\.\d{1,2})?)"?/gi;"
+    @"    var re=/(?:systemVersion|osVersion|iOS|ios|系统版本|操作系统)\"?\s*[:=]\s*\"?(\d{1,2}\.\d{1,2}(?:\.\d{1,2})?)\"?/gi;"
     @"    var m,vs=[];while(m=re.exec(txt)){var v=m[1];if(parseInt(v)>=14&&parseInt(v)<=20&&vs.indexOf(v)<0)vs.push(v);}"
     @"    if(vs.length>0){"
     @"     window.webkit.messageHandlers.i17c.postMessage({"
