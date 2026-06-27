@@ -281,33 +281,28 @@ static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSUR
                 NSString *v=[js substringWithRange:[m rangeAtIndex:1]];
                 if(v) [versions addObject:v];
             }
-            NSDictionary *pi=info[@"priceInfo"];
-            NSString *price=pi[@"priceText"]?:[NSString stringWithFormat:@"%@",pi[@"value"]];
-            if(versions.count>0){
-                for(NSString *ver in versions){
-                    if(![[CollectorConfig shared] shouldCapture:ver])continue;
-                    [[Uploader shared] upload:@{
-                        @"title":title,@"price":price?:@"",
-                        @"ios_ver":ver,@"url":info[@"jumpUrl"]?:u,
-                        @"info_id":[info[@"infoId"]?:info[@"strInfoId"] description]?:@"",
-                        @"time":[df stringFromDate:[NSDate date]],
-                        @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
-                        @"context":[js substringWithRange:NSMakeRange(MAX(0,(NSInteger)[[matches firstObject] range].location-30), MIN(120,js.length))]
-                    }];
+                NSDictionary *pi=info[@"priceInfo"];
+                NSString *price=pi[@"priceText"]?:[NSString stringWithFormat:@"%@",pi[@"value"]];
+                if(versions.count>0){
+                    for(NSString *ver in versions){
+                        if(![[CollectorConfig shared] shouldCapture:ver])continue;
+                        [[Uploader shared] upload:@{
+                            @"title":title,@"price":price?:@"",
+                            @"ios_ver":ver,@"url":info[@"jumpUrl"]?:u,
+                            @"info_id":[info[@"infoId"]?:info[@"strInfoId"] description]?:@"",
+                            @"time":[df stringFromDate:[NSDate date]],
+                            @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
+                            @"context":[js substringWithRange:NSMakeRange(MAX(0,(NSInteger)[[matches firstObject] range].location-30), MIN(120,js.length))]
+                        }];
+                    }
+                } else if([title.lowercaseString hasPrefix:@"iphone"]||[title.lowercaseString hasPrefix:@"ipad"]){
+                    // 没找到 iOS 版本 → 自动拉取详情页
+                    NSString *jumpUrl=info[@"jumpUrl"];
+                    NSString *infoId=[info[@"infoId"]?:info[@"strInfoId"] description];
+                    if(jumpUrl.length>5&&infoId.length>5){
+                        [self _autoFetchDetail:jumpUrl title:title price:price infoId:infoId bid:bid];
+                    }
                 }
-            } else {
-                // 没有 iOS 版本号但有 iPhone 机型，标记
-                if([title.lowercaseString hasPrefix:@"iphone"]||[title.lowercaseString hasPrefix:@"ipad"]){
-                    [[Uploader shared] upload:@{
-                        @"title":title,@"price":price?:@"",
-                        @"ios_ver":@"API",@"url":info[@"jumpUrl"]?:u,
-                        @"info_id":[info[@"infoId"]?:info[@"strInfoId"] description]?:@"",
-                        @"time":[df stringFromDate:[NSDate date]],
-                        @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
-                        @"context":@"[API响应-需人工确认版本]"
-                    }];
-                }
-            }
         }
     }@catch(NSException *e){}
 }
