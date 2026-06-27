@@ -167,11 +167,10 @@ static NSString *kScanJS =
     @"   crawlDetail();"
     @"  }catch(e){}"
     @" }"
-    // 列表页自动抓取详情API (用fetch自带WKWebView Cookie)
     @" function crawlDetail(){"
     @"  try{"
     @"   var links=[];"
-    @"   document.querySelectorAll('[href*="infoId"],a[href*="goods-detail"],a[href*="streamline_detail"]').forEach(function(a){"
+    @"   document.querySelectorAll('[href*=\"infoId\"],a[href*=\"goods-detail\"],a[href*=\"streamline_detail\"]').forEach(function(a){"
     @"    var h=a.href||a.getAttribute('href')||'';"
     @"    var m=h.match(/infoId=(\d+)/);"
     @"    if(m&&!detailSent.has(m[1]))links.push({id:m[1],t:a.textContent.trim().substring(0,60)});"
@@ -182,7 +181,6 @@ static NSString *kScanJS =
     @"   fetchDetailAPI(item.id,item.t);"
     @"  }catch(e){}"
     @" }"
-    // fetch调用详情API (WKWebView Cookie自动附带)
     @" function fetchDetailAPI(infoId,title){"
     @"  var body='infoId='+infoId+'&needVideo=0';"
     @"  var idx=0;"
