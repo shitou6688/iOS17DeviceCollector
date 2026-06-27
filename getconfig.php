@@ -1,5 +1,8 @@
 <?php
-// 供 dylib 调用 - 返回当前阈值配置
+/**
+ * getconfig.php - 返回阈值配置给dylib
+ */
 header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: *');
-readfile(__DIR__ . '/config.json');
+$cfgFile = __DIR__ . '/config.json';
+$cfg = json_decode(file_exists($cfgFile) ? file_get_contents($cfgFile) : '{}', true) ?: [];
+echo json_encode($cfg, JSON_UNESCAPED_UNICODE);

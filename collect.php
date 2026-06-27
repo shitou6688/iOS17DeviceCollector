@@ -1,7 +1,7 @@
 <?php
 /**
- * 接收采集数据
- * POST JSON: {title, price, ios_ver, url, ...}
+ * collect.php - 接收设备采集数据
+ * POST JSON: {title, price, ios_ver, url, info_id, time, source, context}
  */
 header('Content-Type: application/json; charset=utf-8');
 
@@ -12,18 +12,16 @@ $raw = file_get_contents('php://input');
 $data = json_decode($raw, true);
 if (!$data || empty($data['title'])) { echo json_encode(['code'=>-1,'msg'=>'invalid']); exit; }
 
-// 过滤: 必须有 iOS 版本号
+// 版本校验
 $ver = $data['ios_ver'] ?? '';
-if ($ver === 'API') {
-    // API 来源且版本未知, 仍然记录但不报警
+if ($ver === '?' || $ver === 'API') {
+    // 待处理 / API来源，放行
 } elseif (!preg_match('/^\d+\.\d+/', $ver)) {
-    echo json_encode(['code'=>0,'msg'=>'no version']);
-    exit;
+    echo json_encode(['code'=>0,'msg'=>'no version']); exit;
 }
 
-// 按阈值标记
-$configFile = __DIR__ . '/config.json';
-$cfg = json_decode(file_exists($configFile) ? file_get_contents($configFile) : '{}', true) ?: [];
+// 阈值标记
+$cfg = json_decode(file_exists(__DIR__.'/config.json') ? file_get_contents(__DIR__.'/config.json') : '{}', true) ?: [];
 $thresholds = $cfg['thresholds'] ?? [];
 foreach (['lt','eq','gt'] as $op) {
     $tv = $thresholds[$op]['version'] ?? '17.0';
@@ -38,14 +36,13 @@ $dataFile = __DIR__ . '/data/collected.json';
 $all = [];
 if (file_exists($dataFile)) $all = json_decode(file_get_contents($dataFile), true) ?: [];
 
-// 去重 24h
+// 24h去重
 $now = time();
 $key = ($data['title']??'').'|'.($data['info_id']??'').'|'.$ver;
 foreach ($all as $item) {
     $ik = ($item['title']??'').'|'.($item['info_id']??'').'|'.($item['ios_ver']??'');
     if ($ik === $key && $now - strtotime($item['time'] ?? '') < 86400) {
-        echo json_encode(['code'=>0,'msg'=>'dup']);
-        exit;
+        echo json_encode(['code'=>0,'msg'=>'dup']); exit;
     }
 }
 
