@@ -282,19 +282,16 @@ static void _hook_addUS(id self, SEL _cmd, WKUserScript *s){
     if(_orig_addUS)((void(*)(id,SEL,WKUserScript*))_orig_addUS)(self,_cmd,s);
 }
 
-// ====== 遍历所有子类hook NSURLSession ======
+// ====== NSURLSession拦截 (NSMapTable存每class的原始IMP) ======
 
-typedef id (^CompletionBlock)(NSData *, NSURLResponse *, NSError *);
+static NSMapTable *_origMap; // key=Class, value=IMP
 
-static id _hook_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *req, CompletionBlock h) {
-    static IMP orig;
-    if (!orig) {
-        Method m = class_getInstanceMethod([NSURLSession class], @selector(dataTaskWithRequest:completionHandler:));
-        orig = method_getImplementation(m);
-    }
+static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSURLResponse*,NSError*)) {
+    IMP orig = (__bridge IMP)NSMapGet(_origMap, (__bridge void *)[self class]);
+    if (!orig) return nil;
     NSString *url = req.URL.absoluteString;
     if (_isListingURL(url)) {
-        CompletionBlock wrap = ^(NSData *d, NSURLResponse *r, NSError *e) {
+        id(^wrap)(NSData*,NSURLResponse*,NSError*) = ^(NSData *d, NSURLResponse *r, NSError *e) {
             if (d && !e && _respHasDeviceKeywords(d)) _parseAndUpload(d, url);
             if (h) h(d, r, e);
             return (id)nil;
@@ -304,15 +301,12 @@ static id _hook_dataTaskWithRequest(id self, SEL _cmd, NSURLRequest *req, Comple
     return ((id(*)(id,SEL,id,id))orig)(self, _cmd, req, h);
 }
 
-static id _hook_dataTaskWithURL(id self, SEL _cmd, NSURL *url, CompletionBlock h) {
-    static IMP orig;
-    if (!orig) {
-        Method m = class_getInstanceMethod([NSURLSession class], @selector(dataTaskWithURL:completionHandler:));
-        orig = method_getImplementation(m);
-    }
+static id _hook_dtwu(id self, SEL _cmd, NSURL *url, void(^h)(NSData*,NSURLResponse*,NSError*)) {
+    IMP orig = (__bridge IMP)NSMapGet(_origMap, (__bridge void *)[self class]);
+    if (!orig) return nil;
     NSString *urlStr = url.absoluteString;
     if (_isListingURL(urlStr)) {
-        CompletionBlock wrap = ^(NSData *d, NSURLResponse *r, NSError *e) {
+        id(^wrap)(NSData*,NSURLResponse*,NSError*) = ^(NSData *d, NSURLResponse *r, NSError *e) {
             if (d && !e && _respHasDeviceKeywords(d)) _parseAndUpload(d, urlStr);
             if (h) h(d, r, e);
             return (id)nil;
@@ -322,27 +316,37 @@ static id _hook_dataTaskWithURL(id self, SEL _cmd, NSURL *url, CompletionBlock h
     return ((id(*)(id,SEL,id,id))orig)(self, _cmd, url, h);
 }
 
+static void _hookSessionClass(Class cls) {
+    Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
+    Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
+    if (m1) {
+        IMP orig = method_getImplementation(m1);
+        if (orig != (IMP)_hook_dtwr) {
+            NSMapInsert(_origMap, (__bridge void *)cls, (__bridge void *)orig);
+            method_setImplementation(m1, (IMP)_hook_dtwr);
+        }
+    }
+    if (m2) {
+        IMP orig = method_getImplementation(m2);
+        if (orig != (IMP)_hook_dtwu) {
+            NSMapInsert(_origMap, (__bridge void *)cls, (__bridge void *)orig);
+            method_setImplementation(m2, (IMP)_hook_dtwu);
+        }
+    }
+}
+
 static void _hookAllSessions(void) {
-    // 遍历所有类，找到NSURLSession及其子类
+    _origMap = NSCreateMapTable(NSPointerFunctionsOpaqueMemory, NSPointerFunctionsOpaqueMemory, 16);
     unsigned int count;
     Class *classes = objc_copyClassList(&count);
+    Class nsurlsession = objc_getClass("NSURLSession");
     for (unsigned int i = 0; i < count; i++) {
         Class cls = classes[i];
+        if (cls != nsurlsession && !class_respondsToSelector(cls, @selector(dataTaskWithRequest:completionHandler:))) continue;
         NSString *name = NSStringFromClass(cls);
-        // 匹配NSURLSession自身、私有子类(__NSCF*, NSURLSession*, 等)
-        if (![name containsString:@"URLSession"] && ![name hasPrefix:@"__NSCFURL"]) continue;
-        if (!class_respondsToSelector(cls, @selector(dataTaskWithRequest:completionHandler:))) continue;
-
-        Method m1 = class_getInstanceMethod(cls, @selector(dataTaskWithRequest:completionHandler:));
-        Method m2 = class_getInstanceMethod(cls, @selector(dataTaskWithURL:completionHandler:));
-        if (m1) {
-            IMP imp = method_getImplementation(m1);
-            if (imp != _hook_dataTaskWithRequest) method_setImplementation(m1, (IMP)_hook_dataTaskWithRequest);
-        }
-        if (m2) {
-            IMP imp = method_getImplementation(m2);
-            if (imp != _hook_dataTaskWithURL) method_setImplementation(m2, (IMP)_hook_dataTaskWithURL);
-        }
+        BOOL match = (cls == nsurlsession) || [name hasPrefix:@"__NSCFURL"] || [name hasSuffix:@"URLSession"];
+        if (!match) continue;
+        _hookSessionClass(cls);
         NSLog(@"[iOS17Col] hooked: %@", name);
     }
     free(classes);
