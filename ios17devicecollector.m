@@ -65,7 +65,7 @@
 }
 
 - (void)fetchFromServer {
-    NSURL *url = [NSURL URLWithString:@CONFIG_URL];
+    NSURL *url = [NSURL URLWithString:CONFIG_URL];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url cachePolicy:1 timeoutInterval:10];
     [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
         if (!d || e) return;
@@ -87,9 +87,9 @@
         if (arr.count == 3) {
             self.thresholds = arr;
             NSLog(@"[iOS17Col] 配置已更新: lt=%@(%@) eq=%@(%@) gt=%@(%@)",
-                  arr[0].ver, arr[0].enabled?@"ON":@"OFF",
-                  arr[1].ver, arr[1].enabled?@"ON":@"OFF",
-                  arr[2].ver, arr[2].enabled?@"ON":@"OFF");
+                  ((Threshold *)arr[0]).ver, ((Threshold *)arr[0]).enabled?@"ON":@"OFF",
+                  ((Threshold *)arr[1]).ver, ((Threshold *)arr[1]).enabled?@"ON":@"OFF",
+                  ((Threshold *)arr[2]).ver, ((Threshold *)arr[2]).enabled?@"ON":@"OFF");
         }
     }] resume];
 }
