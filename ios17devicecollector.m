@@ -331,7 +331,7 @@ static NSURLSessionDataTask* _hook_dataTaskWithReq(
                 if (s && ([s containsString:@"17.0"] ||
                           [s rangeOfString:@"iOS 17" 
                               options:NSCaseInsensitiveSearch].location != NSNotFound)) {
-                    [self _parseAPIResponse:d url:u];
+                    [(NSObject*)self _parseAPIResponse:d url:u];
                 }
             }
             if (handler) handler(d, r, e);
@@ -383,7 +383,7 @@ static NSURLSessionDataTask* _hook_dataTaskWithReq(
                 di.price = price ?: @"";
                 di.infoId = infoId;
                 di.detailURL = jumpUrl.length > 0 ? jumpUrl : url;
-                di.iosVer = @TARGET_IOS @"?";
+                di.iosVer = [NSString stringWithFormat:@"%@?", TARGET_IOS];
                 di.context = @"[API capture - verify iOS version]";
                 
                 NSDateFormatter *df = [[NSDateFormatter alloc] init];
@@ -414,7 +414,7 @@ static void _init(void) {
             
             [[Uploader shared] log:@"🚀 插件已加载"];
             [[Uploader shared] log:[NSString stringWithFormat:
-                @"目标: iOS %@, 上传: %@", @TARGET_IOS, @UPLOAD_URL]];
+                @"目标: iOS %@, 上传: %@", TARGET_IOS, UPLOAD_URL]];
             
             // Hook 1: WKUserContentController
             Class c = NSClassFromString(@"WKUserContentController");
