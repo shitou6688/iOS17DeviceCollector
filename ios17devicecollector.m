@@ -192,7 +192,7 @@ static NSString *kScanJS =
     [self ensureJS:ctl];
 
     for (NSString *ver in versions) {
-        if (![self _isValidIOSVersion:ver]) continue;
+        if (!_isValidIOSVersion(ver)) continue;
         if (![[CollectorConfig shared] shouldCapture:ver]) continue;
 
         NSDateFormatter *df = [NSDateFormatter new];
@@ -243,7 +243,6 @@ static void _hook_addUS(id self, SEL _cmd, WKUserScript *s){
 - (void)_parseAPI:(NSData *)d url:(NSString *)u;
 - (void)_autoFetchDetail:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid;
 - (void)_extractAndUploadVersion:(NSString *)text title:(NSString *)title price:(NSString *)price url:(NSString *)url infoId:(NSString *)infoId bid:(NSString *)bid;
-- (BOOL)_isValidIOSVersion:(NSString *)ver;
 @end
 
 // URL 关键词匹配：是否可能是商品列表/搜索 API
@@ -379,7 +378,7 @@ static id _hook_dtwu(id self, SEL _cmd, NSURL *url, void(^h)(NSData*,NSURLRespon
     
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-        WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 1, 1) configuration:config];
+        __block WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 1, 1) configuration:config];
         wv.hidden = YES;
         // 注入JS扫描器到隐藏WebView
         if (gHandler) [gHandler ensureJS:wv.configuration.userContentController];
@@ -411,7 +410,7 @@ static id _hook_dtwu(id self, SEL _cmd, NSURL *url, void(^h)(NSData*,NSURLRespon
     NSMutableSet *versions = [NSMutableSet set];
     for (NSTextCheckingResult *m in matches) {
         NSString *v = [text substringWithRange:[m rangeAtIndex:1]];
-        if (v && [self _isValidIOSVersion:v]) [versions addObject:v];
+        if (v && _isValidIOSVersion(v)) [versions addObject:v];
     }
     if (!versions.count) return;
     
@@ -428,7 +427,7 @@ static id _hook_dtwu(id self, SEL _cmd, NSURL *url, void(^h)(NSData*,NSURLRespon
 }
 
 // 校验是否为有效iOS版本号（过滤Darwin内核版本如26.x）
-- (BOOL)_isValidIOSVersion:(NSString *)ver {
+static BOOL _isValidIOSVersion(NSString *ver) {
     if (!ver.length) return NO;
     NSArray *parts = [ver componentsSeparatedByString:@"."];
     if (parts.count < 2) return NO;
