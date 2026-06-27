@@ -192,6 +192,7 @@ static NSString *kScanJS =
     [self ensureJS:ctl];
 
     for (NSString *ver in versions) {
+        if (![self _isValidIOSVersion:ver]) continue;
         if (![[CollectorConfig shared] shouldCapture:ver]) continue;
 
         NSDateFormatter *df = [NSDateFormatter new];
@@ -241,8 +242,8 @@ static void _hook_addUS(id self, SEL _cmd, WKUserScript *s){
 @interface NSObject (I17C)
 - (void)_parseAPI:(NSData *)d url:(NSString *)u;
 - (void)_autoFetchDetail:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid;
-- (void)_tryFetchDetailAPI:(NSString *)infoId title:(NSString *)title price:(NSString *)price bid:(NSString *)bid jumpUrl:(NSString *)jumpUrl retry:(int)retry;
-- (void)_fetchDetailHTML:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid;
+- (void)_extractAndUploadVersion:(NSString *)text title:(NSString *)title price:(NSString *)price url:(NSString *)url infoId:(NSString *)infoId bid:(NSString *)bid;
+- (BOOL)_isValidIOSVersion:(NSString *)ver;
 @end
 
 // URL 关键词匹配：是否可能是商品列表/搜索 API
@@ -358,102 +359,82 @@ static id _hook_dtwu(id self, SEL _cmd, NSURL *url, void(^h)(NSData*,NSURLRespon
 }
 
 // 自动拉取详情页，提取 iOS 版本
-// 限速: 1秒1个，排队延迟执行（不丢弃）
+// 策略: 隐藏WKWebView渲染SPA页面, JS执行后evaluateJavaScript获取文本
+// 限速: 每3秒1个, 排队延迟执行
 - (void)_autoFetchDetail:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid {
     static NSMutableSet *fetched;
     static dispatch_once_t t; dispatch_once(&t,^{fetched=[NSMutableSet set];});
-    @synchronized(fetched){ if([fetched containsObject:infoId]||fetched.count>200)return; [fetched addObject:infoId]; }
+    @synchronized(fetched){ if([fetched containsObject:infoId]||fetched.count>500)return; [fetched addObject:infoId]; }
     static NSTimeInterval nextFetchTime;
     NSTimeInterval now = [[NSDate date] timeIntervalSince1970];
     if (nextFetchTime < now) nextFetchTime = now;
     NSTimeInterval delay = nextFetchTime - now;
-    nextFetchTime += 1.0;
+    nextFetchTime += 3.0; // 3秒间隔, 给JS渲染留时间
     
-    NSString *yyBid = bid;
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-        // 策略1: 先尝试详情API (转转 POST transfer/getitemdetail)
-        [self _tryFetchDetailAPI:infoId title:title price:price bid:yyBid jumpUrl:jumpUrl retry:0];
+    NSString *capturedUrl = jumpUrl;
+    NSString *capturedTitle = title;
+    NSString *capturedPrice = price;
+    NSString *capturedInfoId = infoId;
+    NSString *capturedBid = bid;
+    
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delay * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+        WKWebView *wv = [[WKWebView alloc] initWithFrame:CGRectMake(0, 0, 1, 1) configuration:config];
+        wv.hidden = YES;
+        // 注入JS扫描器到隐藏WebView
+        if (gHandler) [gHandler ensureJS:wv.configuration.userContentController];
+        
+        NSURL *detailUrl = [NSURL URLWithString:capturedUrl];
+        if (!detailUrl) return;
+        NSURLRequest *req = [NSURLRequest requestWithURL:detailUrl cachePolicy:NSURLRequestUseProtocolCachePolicy timeoutInterval:15];
+        
+        // JS渲染完成后提取文本
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 4 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            [wv evaluateJavaScript:@"document.body?document.body.innerText:''" completionHandler:^(id result, NSError *err) {
+                NSString *text = [result isKindOfClass:[NSString class]] ? (NSString *)result : @"";
+                if (text.length > 50) {
+                    [self _extractAndUploadVersion:text title:capturedTitle price:capturedPrice url:capturedUrl infoId:capturedInfoId bid:capturedBid];
+                }
+                [wv stopLoading];
+                wv = nil; // 释放
+            }];
+        });
+        
+        [wv loadRequest:req];
     });
 }
 
-// 递归尝试不同API端点获取详情
-- (void)_tryFetchDetailAPI:(NSString *)infoId title:(NSString *)title price:(NSString *)price bid:(NSString *)bid jumpUrl:(NSString *)jumpUrl retry:(int)retry {
-    NSString *body = [NSString stringWithFormat:@"infoId=%@&needVideo=0", infoId];
-    NSMutableURLRequest *req;
-    if (retry == 0) {
-        // 转转: POST transfer/getitemdetail
-        req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://app.zhuanzhuan.com/zz/transfer/getitemdetail"] cachePolicy:1 timeoutInterval:8];
-    } else if (retry == 1) {
-        // 爱回收/转转备选: POST v2/zzlogic/getiteminfo
-        req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:@"https://app.zhuanzhuan.com/zz/v2/zzlogic/getiteminfo"] cachePolicy:1 timeoutInterval:8];
-    } else if (retry == 2) {
-        // 通用: 从jumpUrl提取host, POST /api/goods/detail
-        NSURL *ju = [NSURL URLWithString:jumpUrl];
-        if (!ju) return;
-        NSString *apiUrl = [NSString stringWithFormat:@"%@://%@/api/goods/detail", ju.scheme, ju.host];
-        req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:apiUrl] cachePolicy:1 timeoutInterval:8];
-    } else {
-        // 最终兜底: 请求原始HTML页面, 增强版regex提取版本号
-        [self _fetchDetailHTML:jumpUrl title:title price:price infoId:infoId bid:bid];
-        return;
+// 从文本中提取iOS版本号并上传（过滤内核版本号）
+- (void)_extractAndUploadVersion:(NSString *)text title:(NSString *)title price:(NSString *)price url:(NSString *)url infoId:(NSString *)infoId bid:(NSString *)bid {
+    NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:iOS|ios|系统版本|操作系统)[：:\\s]+(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)" options:NSRegularExpressionCaseInsensitive error:nil];
+    NSArray *matches = [re matchesInString:text options:0 range:NSMakeRange(0, text.length)];
+    NSMutableSet *versions = [NSMutableSet set];
+    for (NSTextCheckingResult *m in matches) {
+        NSString *v = [text substringWithRange:[m rangeAtIndex:1]];
+        if (v && [self _isValidIOSVersion:v]) [versions addObject:v];
     }
-    req.HTTPMethod = @"POST";
-    req.HTTPBody = [body dataUsingEncoding:NSUTF8StringEncoding];
-    [req setValue:@"application/x-www-form-urlencoded" forHTTPHeaderField:@"Content-Type"];
-    if ([bid containsString:@"zhuanzhuan"]) {
-        [req setValue:@"zhuanzhuan/12.0 (iPhone; iOS 16.0; Scale/2.00)" forHTTPHeaderField:@"User-Agent"];
-    }
+    if (!versions.count) return;
     
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        if (!d || e) { [self _tryFetchDetailAPI:infoId title:title price:price bid:bid jumpUrl:jumpUrl retry:retry+1]; return; }
-        // 尝试JSON解析
-        NSDictionary *j = [NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
-        if (j) {
-            // 把整个响应转字符串搜索版本号
-            NSString *js = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-            NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:iOS|ios|系统|版本|systemVersion|osVersion)\"?:?\\s*[:=]?\\s*\"?(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)\"?" options:NSRegularExpressionCaseInsensitive error:nil];
-            NSArray *m = [re matchesInString:js options:0 range:NSMakeRange(0, js.length)];
-            NSMutableSet *vs = [NSMutableSet set];
-            for (NSTextCheckingResult *mr in m) { NSString *v = [js substringWithRange:[mr rangeAtIndex:1]]; if(v) [vs addObject:v]; }
-            if (vs.count > 0) {
-                NSDateFormatter *df = [NSDateFormatter new]; df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-                for (NSString *ver in vs) {
-                    if (![[CollectorConfig shared] shouldCapture:ver]) continue;
-                    NSUInteger ctxStart = [m.firstObject range].location;
-                    NSString *ctx = @"";
-                    if (ctxStart != NSNotFound && js.length > ctxStart)
-                        ctx = [js substringWithRange:NSMakeRange(MAX(0,(NSInteger)ctxStart-30), MIN(120, js.length-ctxStart))];
-                    [[Uploader shared] upload:@{@"title":title, @"price":price?:@"", @"ios_ver":ver, @"url":jumpUrl, @"info_id":infoId, @"time":[df stringFromDate:[NSDate date]], @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收", @"context":ctx}];
-                }
-                return; // 成功, 不再重试
-            }
-        }
-        // JSON没版本号, 尝试下一个端点
-        [self _tryFetchDetailAPI:infoId title:title price:price bid:bid jumpUrl:jumpUrl retry:retry+1];
-    }] resume];
+    NSDateFormatter *df = [NSDateFormatter new]; df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
+    for (NSString *ver in versions) {
+        if (![[CollectorConfig shared] shouldCapture:ver]) continue;
+        [[Uploader shared] upload:@{
+            @"title":title, @"price":price?:@"", @"ios_ver":ver, @"url":url, @"info_id":infoId,
+            @"time":[df stringFromDate:[NSDate date]],
+            @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
+            @"context":@"webkit_rendered"
+        }];
+    }
 }
 
-// 兜底: 请求HTML页面, 增强版regex(匹配JSON嵌入的版本号)
-- (void)_fetchDetailHTML:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid {
-    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:jumpUrl] cachePolicy:1 timeoutInterval:8];
-    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
-        if (!d || e) return;
-        NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-        // 增强版: 匹配 "iOS 17.0" 或 "systemVersion":"17.0" 或 "os_version":"17.0" 等JSON/HTML中的版本号
-        NSRegularExpression *re = [NSRegularExpression regularExpressionWithPattern:@"(?:iOS|ios|系统|版本|systemVersion|osVersion)\\s*[:=]?\\s*\"?(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)\"?" options:NSRegularExpressionCaseInsensitive error:nil];
-        NSArray *m = [re matchesInString:s options:0 range:NSMakeRange(0, s.length)];
-        NSMutableSet *vs = [NSMutableSet set];
-        for (NSTextCheckingResult *mr in m) { NSString *v = [s substringWithRange:[mr rangeAtIndex:1]]; if(v) [vs addObject:v]; }
-        NSDateFormatter *df = [NSDateFormatter new]; df.dateFormat = @"yyyy-MM-dd HH:mm:ss";
-        for (NSString *ver in vs) {
-            if (![[CollectorConfig shared] shouldCapture:ver]) continue;
-            NSUInteger ctxStart = [m.firstObject range].location;
-            NSString *ctx = @"";
-            if (ctxStart != NSNotFound && s.length > ctxStart)
-                ctx = [s substringWithRange:NSMakeRange(MAX(0,(NSInteger)ctxStart-30), MIN(120, s.length-ctxStart))];
-            [[Uploader shared] upload:@{@"title":title, @"price":price?:@"", @"ios_ver":ver, @"url":jumpUrl, @"info_id":infoId, @"time":[df stringFromDate:[NSDate date]], @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收", @"context":ctx}];
-        }
-    }] resume];
+// 校验是否为有效iOS版本号（过滤Darwin内核版本如26.x）
+- (BOOL)_isValidIOSVersion:(NSString *)ver {
+    if (!ver.length) return NO;
+    NSArray *parts = [ver componentsSeparatedByString:@"."];
+    if (parts.count < 2) return NO;
+    NSInteger major = [parts[0] integerValue];
+    // iOS 版本号范围: 14.0 ~ 20.x（2026年最新），Dawin内核版本号通常 21+
+    return major >= 14 && major <= 20;
 }
 
 @end
