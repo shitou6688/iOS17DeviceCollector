@@ -270,17 +270,44 @@ static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSUR
         for(NSDictionary *info in infos){
             NSString *title=info[@"title"]?:info[@"infoDesc"]?:@"";
             if(title.length<3)continue;
+            // 把整个 info JSON 转字符串，搜索 iOS 版本
+            NSData *jd=[NSJSONSerialization dataWithJSONObject:info options:0 error:nil];
+            NSString *js=[[NSString alloc] initWithData:jd encoding:4];
+            // 正则提取 iOS 版本号
+            NSRegularExpression *re=[NSRegularExpression regularExpressionWithPattern:@"(?:iOS|ios|系统|版本)\\s*(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)" options:0 error:nil];
+            NSArray *matches=[re matchesInString:js options:0 range:NSMakeRange(0,js.length)];
+            NSMutableSet *versions=[NSMutableSet set];
+            for(NSTextCheckingResult *m in matches){
+                NSString *v=[js substringWithRange:[m rangeAtIndex:1]];
+                if(v) [versions addObject:v];
+            }
             NSDictionary *pi=info[@"priceInfo"];
             NSString *price=pi[@"priceText"]?:[NSString stringWithFormat:@"%@",pi[@"value"]];
-            // API 没有 iOS 版本号，标记为 API 来源
-            [[Uploader shared] upload:@{
-                @"title":title,@"price":price?:@"",
-                @"ios_ver":@"API",@"url":info[@"jumpUrl"]?:u,
-                @"info_id":[info[@"infoId"]?:info[@"strInfoId"] description]?:@"",
-                @"time":[df stringFromDate:[NSDate date]],
-                @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
-                @"context":@"[API响应-需人工确认版本]"
-            }];
+            if(versions.count>0){
+                for(NSString *ver in versions){
+                    if(![[CollectorConfig shared] shouldCapture:ver])continue;
+                    [[Uploader shared] upload:@{
+                        @"title":title,@"price":price?:@"",
+                        @"ios_ver":ver,@"url":info[@"jumpUrl"]?:u,
+                        @"info_id":[info[@"infoId"]?:info[@"strInfoId"] description]?:@"",
+                        @"time":[df stringFromDate:[NSDate date]],
+                        @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
+                        @"context":[js substringWithRange:NSMakeRange(MAX(0,(NSInteger)[[matches firstObject] range].location-30), MIN(120,js.length))]
+                    }];
+                }
+            } else {
+                // 没有 iOS 版本号但有 iPhone 机型，标记
+                if([title.lowercaseString hasPrefix:@"iphone"]||[title.lowercaseString hasPrefix:@"ipad"]){
+                    [[Uploader shared] upload:@{
+                        @"title":title,@"price":price?:@"",
+                        @"ios_ver":@"API",@"url":info[@"jumpUrl"]?:u,
+                        @"info_id":[info[@"infoId"]?:info[@"strInfoId"] description]?:@"",
+                        @"time":[df stringFromDate:[NSDate date]],
+                        @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
+                        @"context":@"[API响应-需人工确认版本]"
+                    }];
+                }
+            }
         }
     }@catch(NSException *e){}
 }
