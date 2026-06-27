@@ -240,6 +240,7 @@ static void _hook_addUS(id self, SEL _cmd, WKUserScript *s){
 // Hook NSURLSession (备选)
 @interface NSObject (I17C)
 - (void)_parseAPI:(NSData *)d url:(NSString *)u;
+- (void)_autoFetchDetail:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid;
 @end
 
 static IMP _orig_dtwr;
@@ -306,6 +307,32 @@ static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSUR
         }
     }@catch(NSException *e){}
 }
+
+// 自动拉取详情页，提取 iOS 版本
+- (void)_autoFetchDetail:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid {
+    static NSMutableSet *fetched;
+    static dispatch_once_t t; dispatch_once(&t,^{fetched=[NSMutableSet set];});
+    @synchronized(fetched){ if([fetched containsObject:infoId]||fetched.count>200)return; [fetched addObject:infoId]; }
+    // 限速: 1秒1个
+    static NSTimeInterval last; if([[NSDate date] timeIntervalSince1970]-last<1.0)return; last=[[NSDate date] timeIntervalSince1970];
+    NSMutableURLRequest *req=[NSMutableURLRequest requestWithURL:[NSURL URLWithString:jumpUrl] cachePolicy:1 timeoutInterval:8];
+    [[[NSURLSession sharedSession] dataTaskWithRequest:req completionHandler:^(NSData *d,NSURLResponse *r,NSError *e){
+        if(!d||e)return;
+        NSString *s=[[NSString alloc] initWithData:d encoding:4];
+        NSRegularExpression *re=[NSRegularExpression regularExpressionWithPattern:@"(?:iOS|ios|系统|版本)\\s*(\\d{1,2}\\.\\d{1,2}(?:\\.\\d{1,2})?)" options:0 error:nil];
+        NSArray *m=[re matchesInString:s options:0 range:NSMakeRange(0,s.length)];
+        NSMutableSet *vs=[NSMutableSet set];
+        for(NSTextCheckingResult *mr in m) { NSString *v=[s substringWithRange:[mr rangeAtIndex:1]]; if(v)[vs addObject:v]; }
+        NSDateFormatter *df=[NSDateFormatter new];df.dateFormat=@"yyyy-MM-dd HH:mm:ss";
+        for(NSString *ver in vs){
+            if(![[CollectorConfig shared] shouldCapture:ver])continue;
+            NSUInteger ctxStart=[m.firstObject range].location;
+            NSString *ctx=ctxStart<NSNotFound?s.length>ctxStart?[s substringWithRange:NSMakeRange(MAX(0,(NSInteger)ctxStart-30),MIN(120,s.length))]:@"";
+            [[Uploader shared] upload:@{@"title":title,@"price":price?:@"",@"ios_ver":ver,@"url":jumpUrl,@"info_id":infoId,@"time":[df stringFromDate:[NSDate date]],@"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",@"context":ctx}];
+        }
+    }] resume];
+}
+
 @end
 
 
