@@ -26,7 +26,7 @@
 #import <objc/runtime.h>
 
 // ======================== 配置 ========================
-#define UPLOAD_URL   @"http://124.221.171.80/api/collect.php"
+#define UPLOAD_URL   @"http://124.221.171.80/chaxun/api/collect.php"
 #define TARGET_IOS   @"17.0"
 // ======================================================
 
