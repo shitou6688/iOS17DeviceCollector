@@ -36,4 +36,5 @@ jobs:
             iOS17DeviceCollector.dylib
             ios17devicecollector.plist
             collect.php
+            admin/index.php
           retention-days: 30
