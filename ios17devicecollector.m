@@ -14,6 +14,9 @@
 #define UPLOAD_URL  @"http://124.221.171.80/chaxun/collect.php"
 // ===========================================================
 
+// 前向声明
+static BOOL _isValidIOSVersion(NSString *ver);
+
 #pragma mark - 阈值模型
 
 @interface Threshold : NSObject
