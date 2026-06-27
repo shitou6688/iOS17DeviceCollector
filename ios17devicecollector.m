@@ -341,12 +341,17 @@ static id _hook_dtwu(id self, SEL _cmd, NSURL *url, void(^h)(NSData*,NSURLRespon
                         }];
                     }
                 } else if([title.lowercaseString hasPrefix:@"iphone"]||[title.lowercaseString hasPrefix:@"ipad"]){
-                    // 没找到 iOS 版本 → 自动拉取详情页
+                    // 没找到 iOS 版本 → 上传列表数据，服务端后续处理详情页
                     NSString *jumpUrl=info[@"jumpUrl"]?:info[@"jump_url"]?:info[@"detailUrl"]?:info[@"url"]?:info[@"link"];
                     NSString *infoId=[info[@"infoId"]?:info[@"strInfoId"]?:info[@"id"]?:info[@"spuId"]?:info[@"productId"]?:info[@"goodsId"] description];
-                    if(jumpUrl.length>5&&infoId.length>5){
-                        [self _autoFetchDetail:jumpUrl title:title price:price infoId:infoId bid:bid];
-                    }
+                    [[Uploader shared] upload:@{
+                        @"title":title, @"price":price?:@"",
+                        @"ios_ver":@"?",
+                        @"url":jumpUrl?:u, @"info_id":infoId?:@"",
+                        @"time":[df stringFromDate:[NSDate date]],
+                        @"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",
+                        @"context":@"pending_detail"
+                    }];
                 }
         }
     }@catch(NSException *e){}
