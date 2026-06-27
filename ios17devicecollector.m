@@ -241,14 +241,9 @@ static void _hook_addUS(id self, SEL _cmd, WKUserScript *s){
     if(_orig_addUS)((void(*)(id,SEL,WKUserScript*))_orig_addUS)(self,_cmd,s);
 }
 
-// Hook NSURLSession - dataTaskWithRequest 和 dataTaskWithURL 双钩
-@interface NSObject (I17C)
-- (void)_parseAPI:(NSData *)d url:(NSString *)u;
-- (void)_autoFetchDetail:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid;
-- (void)_extractAndUploadVersion:(NSString *)text title:(NSString *)title price:(NSString *)price url:(NSString *)url infoId:(NSString *)infoId bid:(NSString *)bid;
-@end
+// ========= NSURLProtocol 拦截方案 (NSURLSession类簇无法直接swizzle) =========
 
-// URL 关键词匹配：是否可能是商品列表/搜索 API
+// URL 关键词匹配
 static BOOL _isListingAPI(NSString *u) {
     NSArray *keys = @[@"search",@"list",@"feed",@"flow",@"transfer",@"appraisal",
                       @"product",@"goods",@"item",@"getfeed",@"info",@"spu",
@@ -268,28 +263,82 @@ static BOOL _hasDeviceKeywords(NSData *d) {
         || [s rangeOfString:@"iOS" options:NSCaseInsensitiveSearch].location != NSNotFound;
 }
 
-static IMP _orig_dtwr;
-static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSURLResponse*,NSError*)) {
-    NSString *u = req.URL.absoluteString;
-    if (!_isListingAPI(u)) return ((id(*)(id,SEL,id,id))_orig_dtwr)(self,_cmd,req,h);
-    id(^wrap)(NSData*,NSURLResponse*,NSError*) = ^(NSData *d,NSURLResponse *r,NSError *e){
-        if(d&&!e&&_hasDeviceKeywords(d)) [(NSObject*)self _parseAPI:d url:u];
-        if(h)h(d,r,e);
-        return (id)nil;
-    };
-    return ((id(*)(id,SEL,id,id))_orig_dtwr)(self,_cmd,req,[wrap copy]);
+// 声明NSObject(I17C)的API解析方法
+@interface NSObject (I17C_Protocol)
+- (void)_parseAPI:(NSData *)d url:(NSString *)u;
+- (void)_autoFetchDetail:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid;
+- (void)_extractAndUploadVersion:(NSString *)text title:(NSString *)title price:(NSString *)price url:(NSString *)url infoId:(NSString *)infoId bid:(NSString *)bid;
+@end
+
+@interface I17CURLProtocol : NSURLProtocol
+@end
+
+@implementation I17CURLProtocol
+
++ (BOOL)canInitWithRequest:(NSURLRequest *)request {
+    // 检查是否已处理过（防递归）
+    if ([NSURLProtocol propertyForKey:@"I17CProcessed" inRequest:request]) return NO;
+    return _isListingAPI(request.URL.absoluteString);
 }
 
-static IMP _orig_dtwu;
-static id _hook_dtwu(id self, SEL _cmd, NSURL *url, void(^h)(NSData*,NSURLResponse*,NSError*)) {
-    NSString *u = url.absoluteString;
-    if (!_isListingAPI(u)) return ((id(*)(id,SEL,id,id))_orig_dtwu)(self,_cmd,url,h);
-    id(^wrap)(NSData*,NSURLResponse*,NSError*) = ^(NSData *d,NSURLResponse *r,NSError *e){
-        if(d&&!e&&_hasDeviceKeywords(d)) [(NSObject*)self _parseAPI:d url:u];
-        if(h)h(d,r,e);
-        return (id)nil;
-    };
-    return ((id(*)(id,SEL,id,id))_orig_dtwu)(self,_cmd,url,[wrap copy]);
++ (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
+    return request;
+}
+
+- (void)startLoading {
+    NSMutableURLRequest *mReq = [self.request mutableCopy];
+    [NSURLProtocol setProperty:@YES forKey:@"I17CProcessed" inRequest:mReq];
+    
+    NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+    NSMutableArray *classes = [cfg.protocolClasses mutableCopy];
+    [classes removeObject:[I17CURLProtocol class]];
+    cfg.protocolClasses = classes;
+    
+    NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg];
+    __weak typeof(self) weakSelf = self;
+    NSURLSessionDataTask *task = [session dataTaskWithRequest:mReq completionHandler:^(NSData *d, NSURLResponse *r, NSError *e) {
+        if (d && !e && _hasDeviceKeywords(d)) {
+            [(NSObject *)weakSelf _parseAPI:d url:self.request.URL.absoluteString];
+        }
+        if (e) {
+            [self.client URLProtocol:self didFailWithError:e];
+        } else {
+            [self.client URLProtocol:self didReceiveResponse:r cacheStoragePolicy:NSURLCacheStorageNotAllowed];
+            [self.client URLProtocol:self didLoadData:d];
+            [self.client URLProtocolDidFinishLoading:self];
+        }
+    }];
+    [task resume];
+}
+
+- (void)stopLoading {}
+
+@end
+
+// Swizzle NSURLSessionConfiguration 注入 NSURLProtocol
+static void _injectProtocolIntoConfiguration(id config) {
+    @try {
+        NSArray *classes = [config valueForKey:@"protocolClasses"];
+        if (![classes containsObject:[I17CURLProtocol class]]) {
+            NSMutableArray *newClasses = [classes mutableCopy] ?: [NSMutableArray array];
+            [newClasses insertObject:[I17CURLProtocol class] atIndex:0];
+            [config setValue:newClasses forKey:@"protocolClasses"];
+        }
+    } @catch (NSException *e) {}
+}
+
+static IMP _orig_defaultCfg;
+static id _hook_defaultCfg(id self, SEL _cmd) {
+    id cfg = ((id(*)(id,SEL))_orig_defaultCfg)(self,_cmd);
+    _injectProtocolIntoConfiguration(cfg);
+    return cfg;
+}
+
+static IMP _orig_ephemeralCfg;
+static id _hook_ephemeralCfg(id self, SEL _cmd) {
+    id cfg = ((id(*)(id,SEL))_orig_ephemeralCfg)(self,_cmd);
+    _injectProtocolIntoConfiguration(cfg);
+    return cfg;
 }
 
 @implementation NSObject (I17C)
@@ -453,12 +502,14 @@ static void _init(void) {
                 m=class_getInstanceMethod(c,@selector(addUserScript:));
                 if(m){_orig_addUS=method_getImplementation(m);method_setImplementation(m,(IMP)_hook_addUS);}
             }
-            Class sc=NSClassFromString(@"NSURLSession");
-            if(sc){
-                Method m=class_getInstanceMethod(sc,@selector(dataTaskWithRequest:completionHandler:));
-                if(m){_orig_dtwr=method_getImplementation(m);method_setImplementation(m,(IMP)_hook_dtwr);}
-                m=class_getInstanceMethod(sc,@selector(dataTaskWithURL:completionHandler:));
-                if(m){_orig_dtwu=method_getImplementation(m);method_setImplementation(m,(IMP)_hook_dtwu);}
+            // 注册NSURLProtocol(NSURLSession是类簇，不能用method_setImplementation)
+            [NSURLProtocol registerClass:[I17CURLProtocol class]];
+            Class cfgClass = NSClassFromString(@"NSURLSessionConfiguration");
+            if (cfgClass) {
+                Method m = class_getClassMethod(cfgClass, @selector(defaultSessionConfiguration));
+                if (m) { _orig_defaultCfg = method_getImplementation(m); method_setImplementation(m, (IMP)_hook_defaultCfg); }
+                m = class_getClassMethod(cfgClass, @selector(ephemeralSessionConfiguration));
+                if (m) { _orig_ephemeralCfg = method_getImplementation(m); method_setImplementation(m, (IMP)_hook_ephemeralCfg); }
             }
             NSLog(@"[iOS17Col] ✅ Hooks done");
         });
