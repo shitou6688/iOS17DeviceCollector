@@ -282,12 +282,18 @@ static void _hook_addUS(id self, SEL _cmd, WKUserScript *s){
     if(_orig_addUS)((void(*)(id,SEL,WKUserScript*))_orig_addUS)(self,_cmd,s);
 }
 
-// ====== NSURLSession拦截 (NSMapTable存每class的原始IMP) ======
+// ====== NSURLSession拦截 (NSMutableDictionary存每class的原始IMP) ======
 
-static NSMapTable *_origMap; // key=Class, value=IMP
+static NSMutableDictionary *_origDWTR; // key=NSStringFromClass, value=NSValue of IMP
+static NSMutableDictionary *_origDTWU;
 
 static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSURLResponse*,NSError*)) {
-    IMP orig = (__bridge IMP)NSMapGet(_origMap, (__bridge void *)[self class]);
+    IMP orig = NULL;
+    @synchronized(_origDWTR) {
+        NSValue *v = _origDWTR[NSStringFromClass(object_getClass(self))];
+        if (!v) v = _origDWTR[NSStringFromClass([self class])];
+        orig = (IMP)[v pointerValue];
+    }
     if (!orig) return nil;
     NSString *url = req.URL.absoluteString;
     if (_isListingURL(url)) {
@@ -302,7 +308,12 @@ static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSUR
 }
 
 static id _hook_dtwu(id self, SEL _cmd, NSURL *url, void(^h)(NSData*,NSURLResponse*,NSError*)) {
-    IMP orig = (__bridge IMP)NSMapGet(_origMap, (__bridge void *)[self class]);
+    IMP orig = NULL;
+    @synchronized(_origDTWU) {
+        NSValue *v = _origDTWU[NSStringFromClass(object_getClass(self))];
+        if (!v) v = _origDTWU[NSStringFromClass([self class])];
+        orig = (IMP)[v pointerValue];
+    }
     if (!orig) return nil;
     NSString *urlStr = url.absoluteString;
     if (_isListingURL(urlStr)) {
@@ -322,21 +333,22 @@ static void _hookSessionClass(Class cls) {
     if (m1) {
         IMP orig = method_getImplementation(m1);
         if (orig != (IMP)_hook_dtwr) {
-            NSMapInsert(_origMap, (__bridge void *)cls, (__bridge void *)orig);
+            _origDWTR[NSStringFromClass(cls)] = [NSValue valueWithPointer:orig];
             method_setImplementation(m1, (IMP)_hook_dtwr);
         }
     }
     if (m2) {
         IMP orig = method_getImplementation(m2);
         if (orig != (IMP)_hook_dtwu) {
-            NSMapInsert(_origMap, (__bridge void *)cls, (__bridge void *)orig);
+            _origDTWU[NSStringFromClass(cls)] = [NSValue valueWithPointer:orig];
             method_setImplementation(m2, (IMP)_hook_dtwu);
         }
     }
 }
 
 static void _hookAllSessions(void) {
-    _origMap = NSCreateMapTable(NSPointerFunctionsOpaqueMemory, NSPointerFunctionsOpaqueMemory, 16);
+    _origDWTR = [NSMutableDictionary dictionary];
+    _origDTWU = [NSMutableDictionary dictionary];
     unsigned int count;
     Class *classes = objc_copyClassList(&count);
     Class nsurlsession = objc_getClass("NSURLSession");
