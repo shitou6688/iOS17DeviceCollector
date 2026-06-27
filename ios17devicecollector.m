@@ -327,7 +327,9 @@ static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSUR
         for(NSString *ver in vs){
             if(![[CollectorConfig shared] shouldCapture:ver])continue;
             NSUInteger ctxStart=[m.firstObject range].location;
-            NSString *ctx=ctxStart<NSNotFound?s.length>ctxStart?[s substringWithRange:NSMakeRange(MAX(0,(NSInteger)ctxStart-30),MIN(120,s.length))]:@"";
+            NSString *ctx=@"";
+            if(ctxStart!=NSNotFound&&s.length>ctxStart)
+                ctx=[s substringWithRange:NSMakeRange(MAX(0,(NSInteger)ctxStart-30),MIN(120,s.length-ctxStart))];
             [[Uploader shared] upload:@{@"title":title,@"price":price?:@"",@"ios_ver":ver,@"url":jumpUrl,@"info_id":infoId,@"time":[df stringFromDate:[NSDate date]],@"source":[bid containsString:@"zhuanzhuan"]?@"转转":@"爱回收",@"context":ctx}];
         }
     }] resume];
