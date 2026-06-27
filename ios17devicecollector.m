@@ -99,7 +99,7 @@
     [self log:[NSString stringWithFormat:@"📱 捕获: %@ | ¥%@",
         device.title, device.price]];
     
-    NSURL *url = [NSURL URLWithString:@UPLOAD_URL];
+    NSURL *url = [NSURL URLWithString:UPLOAD_URL];
     NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
     req.HTTPMethod = @"POST";
     req.HTTPBody = [[device jsonString] dataUsingEncoding:NSUTF8StringEncoding];
@@ -203,7 +203,7 @@ static NSString *kDetailJS =
     di.title = b[@"title"] ?: @"未知";
     di.price = b[@"price"] ?: @"";
     di.detailURL = b[@"u"] ?: @"";
-    di.iosVer = @TARGET_IOS;
+    di.iosVer = TARGET_IOS;
     di.context = b[@"ctx"] ?: @"";
     
     // 来源
@@ -308,7 +308,13 @@ static void _hook_addUserScript(id self, SEL _cmd, WKUserScript *script) {
 }
 
 
-#pragma mark - Hook: NSURLSession (备选兜底)
+#pragma mark - Hook: NSURLSession
+
+@interface NSObject (iOS17C_APIHook)
+- (void)_parseAPIResponse:(NSData *)data url:(NSString *)url;
+@end
+
+// ======================== NSURLSession Hook ========================
 
 static IMP _orig_dataTaskWithReq;
 static NSURLSessionDataTask* _hook_dataTaskWithReq(
@@ -343,10 +349,6 @@ static NSURLSessionDataTask* _hook_dataTaskWithReq(
     return ((id(*)(id,SEL,id,id))_orig_dataTaskWithReq)(self,_cmd,req,handler);
 }
 
-
-@interface NSObject (iOS17C_APIHook)
-- (void)_parseAPIResponse:(NSData *)data url:(NSString *)url;
-@end
 
 @implementation NSObject (iOS17C_APIHook)
 
