@@ -237,39 +237,80 @@ static void _hook_addUS(id self, SEL _cmd, WKUserScript *s){
     if(_orig_addUS)((void(*)(id,SEL,WKUserScript*))_orig_addUS)(self,_cmd,s);
 }
 
-// Hook NSURLSession (备选)
+// Hook NSURLSession - dataTaskWithRequest 和 dataTaskWithURL 双钩
 @interface NSObject (I17C)
 - (void)_parseAPI:(NSData *)d url:(NSString *)u;
 - (void)_autoFetchDetail:(NSString *)jumpUrl title:(NSString *)title price:(NSString *)price infoId:(NSString *)infoId bid:(NSString *)bid;
 @end
 
+// URL 关键词匹配：是否可能是商品列表/搜索 API
+static BOOL _isListingAPI(NSString *u) {
+    NSArray *keys = @[@"search",@"list",@"feed",@"flow",@"transfer",@"appraisal",
+                      @"product",@"goods",@"item",@"getfeed",@"info",@"spu",
+                      @"recommend",@"category",@"home",@"channel",@"page"];
+    for (NSString *k in keys) {
+        if ([u rangeOfString:k options:NSCaseInsensitiveSearch].location != NSNotFound) return YES;
+    }
+    return NO;
+}
+
+// 响应内容关键词匹配
+static BOOL _hasDeviceKeywords(NSData *d) {
+    NSString *s = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+    if (!s) return NO;
+    return [s rangeOfString:@"iPhone" options:NSCaseInsensitiveSearch].location != NSNotFound
+        || [s rangeOfString:@"iPad" options:NSCaseInsensitiveSearch].location != NSNotFound
+        || [s rangeOfString:@"iOS" options:NSCaseInsensitiveSearch].location != NSNotFound;
+}
+
 static IMP _orig_dtwr;
 static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSURLResponse*,NSError*)) {
     NSString *u = req.URL.absoluteString;
-    if ([u containsString:@"transfer/search"]||[u containsString:@"getfeedflowinfo"]) {
-        id(^wrap)(NSData*,NSURLResponse*,NSError*) = ^(NSData *d,NSURLResponse *r,NSError *e){
-            if(d&&!e){
-                NSString *s=[[NSString alloc] initWithData:d encoding:4];
-                if(s&&[s rangeOfString:@"iOS" options:1].location!=NSNotFound)[(NSObject*)self _parseAPI:d url:u];
-            }
-            if(h)h(d,r,e);
-            return (id)nil;
-        };
-        return ((id(*)(id,SEL,id,id))_orig_dtwr)(self,_cmd,req,[wrap copy]);
-    }
-    return ((id(*)(id,SEL,id,id))_orig_dtwr)(self,_cmd,req,h);
+    if (!_isListingAPI(u)) return ((id(*)(id,SEL,id,id))_orig_dtwr)(self,_cmd,req,h);
+    id(^wrap)(NSData*,NSURLResponse*,NSError*) = ^(NSData *d,NSURLResponse *r,NSError *e){
+        if(d&&!e&&_hasDeviceKeywords(d)) [(NSObject*)self _parseAPI:d url:u];
+        if(h)h(d,r,e);
+        return (id)nil;
+    };
+    return ((id(*)(id,SEL,id,id))_orig_dtwr)(self,_cmd,req,[wrap copy]);
+}
+
+static IMP _orig_dtwu;
+static id _hook_dtwu(id self, SEL _cmd, NSURL *url, void(^h)(NSData*,NSURLResponse*,NSError*)) {
+    NSString *u = url.absoluteString;
+    if (!_isListingAPI(u)) return ((id(*)(id,SEL,id,id))_orig_dtwu)(self,_cmd,url,h);
+    id(^wrap)(NSData*,NSURLResponse*,NSError*) = ^(NSData *d,NSURLResponse *r,NSError *e){
+        if(d&&!e&&_hasDeviceKeywords(d)) [(NSObject*)self _parseAPI:d url:u];
+        if(h)h(d,r,e);
+        return (id)nil;
+    };
+    return ((id(*)(id,SEL,id,id))_orig_dtwu)(self,_cmd,url,[wrap copy]);
 }
 
 @implementation NSObject (I17C)
 - (void)_parseAPI:(NSData *)d url:(NSString *)u {
     @try {
         NSDictionary *j=[NSJSONSerialization JSONObjectWithData:d options:0 error:nil];
-        NSArray *infos=j[@"respData"][@"infos"]?:j[@"data"][@"list"]?:j[@"data"][@"infos"];
+        // 扩展 JSON 路径匹配
+        NSArray *infos=j[@"respData"][@"infos"]
+                  ?:j[@"data"][@"list"]
+                  ?:j[@"data"][@"infos"]
+                  ?:j[@"data"][@"items"]
+                  ?:j[@"data"][@"products"]
+                  ?:j[@"data"][@"resultList"]
+                  ?:j[@"data"][@"productList"]
+                  ?:j[@"data"][@"recordList"]
+                  ?:j[@"data"][@"spuInfos"]
+                  ?:j[@"result"][@"data"]
+                  ?:j[@"result"][@"list"]
+                  ?:j[@"list"]
+                  ?:j[@"infos"]
+                  ?:j[@"data"];  // data 本身可能是数组
         if(![infos isKindOfClass:[NSArray class]])return;
         NSDateFormatter *df=[NSDateFormatter new];df.dateFormat=@"yyyy-MM-dd HH:mm:ss";
         NSString *bid=[[NSBundle mainBundle] bundleIdentifier];
         for(NSDictionary *info in infos){
-            NSString *title=info[@"title"]?:info[@"infoDesc"]?:@"";
+            NSString *title=info[@"title"]?:info[@"infoDesc"]?:info[@"name"]?:info[@"productName"]?:info[@"goodsName"]?:@"";
             if(title.length<3)continue;
             // 把整个 info JSON 转字符串，搜索 iOS 版本
             NSData *jd=[NSJSONSerialization dataWithJSONObject:info options:0 error:nil];
@@ -284,6 +325,7 @@ static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSUR
             }
                 NSDictionary *pi=info[@"priceInfo"];
                 NSString *price=pi[@"priceText"]?:[NSString stringWithFormat:@"%@",pi[@"value"]];
+                if(!price.length) price=info[@"price"]?:info[@"priceText"]?:info[@"productPrice"]?:@"";
                 if(versions.count>0){
                     for(NSString *ver in versions){
                         if(![[CollectorConfig shared] shouldCapture:ver])continue;
@@ -298,8 +340,8 @@ static id _hook_dtwr(id self, SEL _cmd, NSURLRequest *req, void(^h)(NSData*,NSUR
                     }
                 } else if([title.lowercaseString hasPrefix:@"iphone"]||[title.lowercaseString hasPrefix:@"ipad"]){
                     // 没找到 iOS 版本 → 自动拉取详情页
-                    NSString *jumpUrl=info[@"jumpUrl"];
-                    NSString *infoId=[info[@"infoId"]?:info[@"strInfoId"] description];
+                    NSString *jumpUrl=info[@"jumpUrl"]?:info[@"jump_url"]?:info[@"detailUrl"]?:info[@"url"]?:info[@"link"];
+                    NSString *infoId=[info[@"infoId"]?:info[@"strInfoId"]?:info[@"id"]?:info[@"spuId"]?:info[@"productId"]?:info[@"goodsId"] description];
                     if(jumpUrl.length>5&&infoId.length>5){
                         [self _autoFetchDetail:jumpUrl title:title price:price infoId:infoId bid:bid];
                     }
@@ -366,6 +408,8 @@ static void _init(void) {
             if(sc){
                 Method m=class_getInstanceMethod(sc,@selector(dataTaskWithRequest:completionHandler:));
                 if(m){_orig_dtwr=method_getImplementation(m);method_setImplementation(m,(IMP)_hook_dtwr);}
+                m=class_getInstanceMethod(sc,@selector(dataTaskWithURL:completionHandler:));
+                if(m){_orig_dtwu=method_getImplementation(m);method_setImplementation(m,(IMP)_hook_dtwu);}
             }
             NSLog(@"[iOS17Col] ✅ Hooks done");
         });
